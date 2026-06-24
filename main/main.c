@@ -317,14 +317,10 @@ static void lcd_page_show_threshold(sys_state_t *s)
 
     y = LCD_Y(6);
     lcd_fill(0, y, 239, y + 95, BLACK);
-    if (s->sys_mode == MODE_TH_CONFIG) {
-        lcd_safe_str(6, 1, "** CONFIG MODE", RED, BLACK);
-        lcd_safe_str(7, 1, "K2:-      K3:+", YELLOW, BLACK);
-        lcd_safe_str(8, 1, "K1:Exit Config", WHITE, BLACK);
-    } else {
-        lcd_safe_str(7, 1, "Hold K1 2s to", LGRAY, BLACK);
-        lcd_safe_str(8, 1, "enter config", LGRAY, BLACK);
-    }
+    /* Threshold 页面始终可调节阈值：K2 减, K3 增, K1 切回数据页 */
+    lcd_safe_str(6, 1, "Adjust: K2/K3 ", CYAN, BLACK);
+    lcd_safe_str(7, 1, "K2:-      K3:+", YELLOW, BLACK);
+    lcd_safe_str(8, 1, "K1:Next Page ", WHITE, BLACK);
 
     y = LCD_Y(9);
     lcd_fill(0, y, 239, 319, DARKBLUE);
@@ -618,47 +614,26 @@ static void task_key_handler(void *pvParameters)
         if (xQueueReceive(g_key_queue, &evt, portMAX_DELAY) != pdTRUE) continue;
         if (xSemaphoreTake(g_state_mutex, portMAX_DELAY) != pdTRUE) continue;
 
-        /* K1: 页面切换 / 阈值配置 */
+        /* K1: 页面切换 */
         if (evt.key_id == KEY1_PRESSED) {
             if (evt.evt == KEY_EVT_SHORT) {
-                if (g_sys.sys_mode == MODE_TH_CONFIG) {
-                    g_sys.sys_mode = MODE_NORMAL;
-                    ESP_LOGI(TAG_MAIN, "Exit threshold config");
-                } else {
-                    g_sys.lcd_page = (g_sys.lcd_page + 1) % LCD_PAGE_MAX;
-                    ESP_LOGI(TAG_MAIN, "Page -> %d", (int)g_sys.lcd_page);
-                }
+                /* 短按循环切换页面 P0→P1→P2→P0 */
+                g_sys.lcd_page = (g_sys.lcd_page + 1) % LCD_PAGE_MAX;
+                ESP_LOGI(TAG_MAIN, "Page -> %d", (int)g_sys.lcd_page);
             } else if (evt.evt == KEY_EVT_LONG) {
-                if (g_sys.sys_mode == MODE_NORMAL) {
-                    g_sys.sys_mode = MODE_TH_CONFIG;
+                /* 长按直接跳转到阈值配置页 */
+                if (g_sys.lcd_page != LCD_PAGE_THRESHOLD) {
                     g_sys.lcd_page = LCD_PAGE_THRESHOLD;
-                    ESP_LOGI(TAG_MAIN, "Enter threshold config");
+                    ESP_LOGI(TAG_MAIN, "Long press -> Threshold page");
                 } else {
-                    g_sys.sys_mode = MODE_NORMAL;
-                    ESP_LOGI(TAG_MAIN, "Exit threshold config");
+                    g_sys.lcd_page = LCD_PAGE_DATA;
+                    ESP_LOGI(TAG_MAIN, "Long press -> Data page");
                 }
             }
         }
 
-        /* K3 (非配置模式): 蜂鸣器开关测试 */
-        if (evt.key_id == KEY3_PRESSED && g_sys.sys_mode != MODE_TH_CONFIG) {
-            if (evt.evt == KEY_EVT_SHORT) {
-                if (g_sys.buzzer_mode == BUZZER_AUTO) {
-                    g_sys.buzzer_mode = BUZZER_ON;
-                    beep_on();
-                    g_sys.buzzer_state = true;
-                    ESP_LOGI(TAG_MAIN, "*** Buzzer TEST ON ***");
-                } else {
-                    g_sys.buzzer_mode = BUZZER_AUTO;
-                    beep_off();
-                    g_sys.buzzer_state = false;
-                    ESP_LOGI(TAG_MAIN, "*** Buzzer TEST OFF ***");
-                }
-            }
-        }
-
-        /* K2: 阈值减小 (配置模式) */
-        if (evt.key_id == KEY2_PRESSED && g_sys.sys_mode == MODE_TH_CONFIG) {
+        /* K2: 阈值减小 (Threshold 页面) */
+        if (evt.key_id == KEY2_PRESSED && g_sys.lcd_page == LCD_PAGE_THRESHOLD) {
             if (evt.evt == KEY_EVT_SHORT) {
                 if (g_sys.th_low > 50)       g_sys.th_low   -= 50;
                 if (g_sys.th_mid_l > g_sys.th_low + 100) g_sys.th_mid_l -= 50;
@@ -675,8 +650,8 @@ static void task_key_handler(void *pvParameters)
                      g_sys.th_high, g_sys.th_mid_h, g_sys.th_mid_l, g_sys.th_low);
         }
 
-        /* K3: 阈值增大 (配置模式) */
-        if (evt.key_id == KEY3_PRESSED && g_sys.sys_mode == MODE_TH_CONFIG) {
+        /* K3: 阈值增大 (Threshold 页面) */
+        if (evt.key_id == KEY3_PRESSED && g_sys.lcd_page == LCD_PAGE_THRESHOLD) {
             if (evt.evt == KEY_EVT_SHORT) {
                 if (g_sys.th_high < 3550)     g_sys.th_high  += 50;
                 if (g_sys.th_mid_h < g_sys.th_high - 100) g_sys.th_mid_h += 50;
@@ -691,6 +666,38 @@ static void task_key_handler(void *pvParameters)
             }
             ESP_LOGI(TAG_MAIN, "TH: H=%u MH=%u ML=%u L=%u",
                      g_sys.th_high, g_sys.th_mid_h, g_sys.th_mid_l, g_sys.th_low);
+        }
+
+        /* K3 (非 Threshold 页面): 蜂鸣器开关测试 */
+        if (evt.key_id == KEY3_PRESSED && g_sys.lcd_page != LCD_PAGE_THRESHOLD) {
+            if (evt.evt == KEY_EVT_SHORT) {
+                if (g_sys.buzzer_mode == BUZZER_AUTO) {
+                    g_sys.buzzer_mode = BUZZER_ON;
+                    beep_on();
+                    g_sys.buzzer_state = true;
+                    ESP_LOGI(TAG_MAIN, "*** Buzzer TEST ON ***");
+                } else {
+                    g_sys.buzzer_mode = BUZZER_AUTO;
+                    beep_off();
+                    g_sys.buzzer_state = false;
+                    ESP_LOGI(TAG_MAIN, "*** Buzzer TEST OFF ***");
+                }
+            }
+        }
+
+        /* K2 (非 Threshold 页面): 强制关闭蜂鸣器 */
+        if (evt.key_id == KEY2_PRESSED && g_sys.lcd_page != LCD_PAGE_THRESHOLD) {
+            if (evt.evt == KEY_EVT_SHORT) {
+                if (g_sys.buzzer_mode != BUZZER_OFF) {
+                    g_sys.buzzer_mode = BUZZER_OFF;
+                    beep_off();
+                    g_sys.buzzer_state = false;
+                    ESP_LOGI(TAG_MAIN, "*** Buzzer OFF (K2) ***");
+                } else {
+                    g_sys.buzzer_mode = BUZZER_AUTO;
+                    ESP_LOGI(TAG_MAIN, "*** Buzzer AUTO (K2) ***");
+                }
+            }
         }
 
         xSemaphoreGive(g_state_mutex);

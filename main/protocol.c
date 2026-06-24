@@ -85,7 +85,18 @@ int protocol_parse_downlink(const char *json, sys_state_t *s,
     /* ---- 1. 设置阈值指令 ---- */
     if (strstr(json, "\"set_threshold\"")) {
         int th, tmh, tml, tl;
-        int n = sscanf(json,
+
+        /* 去除 JSON 中所有空格，兼容 json.dumps(紧凑) 和 json.dumps(带空格) 两种格式 */
+        char json_nosp[256];
+        int len = strlen(json);
+        if (len >= (int)sizeof(json_nosp)) len = (int)sizeof(json_nosp) - 1;
+        int j = 0;
+        for (int i = 0; i < len; i++) {
+            if (json[i] != ' ') json_nosp[j++] = json[i];
+        }
+        json_nosp[j] = '\0';
+
+        int n = sscanf(json_nosp,
             "{\"cmd\":\"set_threshold\",\"th_high\":%d,\"th_mid_h\":%d,\"th_mid_l\":%d,\"th_low\":%d}",
             &th, &tmh, &tml, &tl);
         if (n == 4) {
