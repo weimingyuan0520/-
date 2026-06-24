@@ -20,6 +20,8 @@ from tcp_handler import TcpHandler
 from protocol import (
     build_command_set_threshold,
     build_command_buzzer,
+    build_command_get_status,
+    validate_thresholds,
 )
 
 # ============================================================
@@ -72,6 +74,8 @@ class LightMonitorApp(ctk.CTk):
             on_data=self._on_data, on_status=self._on_status)
 
         self.log_lines = []
+        self._syncing_sliders = False   # 防止滑块同步时触发回调循环
+        self._sliders_synced = False    # 仅在首次收到数据时同步滑块
 
         self._build_ui()
         self._poll_data()
@@ -255,7 +259,7 @@ class LightMonitorApp(ctk.CTk):
 
         ctk.CTkButton(frame, text="查询设备状态", height=32,
                       command=lambda: self._send_command(
-                          '{"cmd":"get_status"}')).pack(fill="x", padx=12, pady=2)
+                          build_command_get_status())).pack(fill="x", padx=12, pady=2)
 
     def _make_slider(self, parent, name, min_v, max_v, default):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -274,7 +278,8 @@ class LightMonitorApp(ctk.CTk):
 
         def on_slide(v):
             val_label.configure(text=str(int(v)))
-            self._on_slider_change()
+            if not self._syncing_sliders:
+                self._on_slider_change()
 
         slider.configure(command=on_slide)
         return slider
@@ -326,6 +331,7 @@ class LightMonitorApp(ctk.CTk):
                 ok = self.serial.connect(port)
                 if ok:
                     self.btn_serial.configure(text="断开串口")
+                    self._sliders_synced = False  # 重新连接后允许同步一次
                     self._log(f"[串口] 已连接: {port}")
                 else:
                     self._log(f"[串口] 连接失败: {port}")
@@ -345,6 +351,7 @@ class LightMonitorApp(ctk.CTk):
             ok = self.tcp.connect(host, port)
             if ok:
                 self.btn_tcp.configure(text="断开网络")
+                self._sliders_synced = False  # 重新连接后允许同步一次
                 self._log(f"[网络] 已连接: {host}:{port}")
             else:
                 self._log(f"[网络] 连接失败: {host}:{port}")
@@ -360,24 +367,35 @@ class LightMonitorApp(ctk.CTk):
         self.data_queue.put(data)
 
     def _send_command(self, cmd_str):
-        sent = False
-        if self.serial.is_connected():
-            sent = self.serial.send(cmd_str) or sent
+        """发送指令：优先 TCP（双向可靠），串口仅做备选"""
+        sent_tcp = False
+        sent_serial = False
+        # TCP 优先 — 双向通信可靠
         if self.tcp.is_connected():
-            sent = self.tcp.send(cmd_str) or sent
-        if sent:
-            self._log(f"发送 >>> {cmd_str}")
+            sent_tcp = self.tcp.send(cmd_str)
+        # 串口备选（注意：本开发板串口下行 GPIO38 硬件不通，可能无效）
+        if self.serial.is_connected():
+            sent_serial = self.serial.send(cmd_str)
+
+        if sent_tcp:
+            self._log(f"[TCP] 发送 >>> {cmd_str}")
+        elif sent_serial:
+            self._log(f"[串口] 发送 >>> {cmd_str}  (⚠ 串口下行可能不通，建议使用网络连接)")
         else:
-            self._log("发送 >>> 无可用连接!")
+            self._log("发送 >>> 无可用连接! 请先连接网络(TCP)或串口")
 
     def _send_thresholds(self):
-        th = (
-            int(self.slider_th_high.get()),
-            int(self.slider_th_mid_h.get()),
-            int(self.slider_th_mid_l.get()),
-            int(self.slider_th_low.get()),
-        )
-        cmd = build_command_set_threshold(*th)
+        th_high   = int(self.slider_th_high.get())
+        th_mid_h  = int(self.slider_th_mid_h.get())
+        th_mid_l  = int(self.slider_th_mid_l.get())
+        th_low    = int(self.slider_th_low.get())
+
+        # 校验：必须满足 th_high > th_mid_h > th_mid_l > th_low
+        if not validate_thresholds(th_high, th_mid_h, th_mid_l, th_low):
+            self._log("发送 >>> 阈值校验失败: 必须满足 强光 > 偏亮 > 偏暗 > 极暗")
+            return
+
+        cmd = build_command_set_threshold(th_high, th_mid_h, th_mid_l, th_low)
         self._send_command(cmd)
 
     def _on_slider_change(self):
@@ -416,6 +434,24 @@ class LightMonitorApp(ctk.CTk):
             pass
         self.after(100, self._poll_data)
 
+    def _sync_sliders_from_data(self, data):
+        """仅在首次收到设备数据时同步滑块，之后由用户自由控制，避免每500ms覆盖用户拖拽值"""
+        if self._sliders_synced:
+            return
+        keys = ("th_high", "th_mid_h", "th_mid_l", "th_low")
+        sliders = (self.slider_th_high, self.slider_th_mid_h,
+                   self.slider_th_mid_l, self.slider_th_low)
+        self._syncing_sliders = True
+        try:
+            for key, slider in zip(keys, sliders):
+                val = data.get(key)
+                if val is not None:
+                    slider.set(int(val))
+        finally:
+            self._syncing_sliders = False
+        self._sliders_synced = True
+        self._on_slider_change()
+
     def _update_display(self, data):
         light = data.get("light", 0)
         level = data.get("light_level", 2)
@@ -440,6 +476,9 @@ class LightMonitorApp(ctk.CTk):
 
         self.th_label.configure(
             text=f"阈值: {th[0]}/{th[1]}/{th[2]}/{th[3]}")
+
+        # 同步滑块到设备实际阈值
+        self._sync_sliders_from_data(data)
 
     def _update_plot(self):
         if self.history:

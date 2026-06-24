@@ -48,3 +48,9 @@ LIGHT_LEVEL_NAMES = {
     3: "DIM",
     4: "VERY_DARK",
 }
+
+
+def validate_thresholds(th_high, th_mid_h, th_mid_l, th_low):
+    """校验阈值合法性：th_high > th_mid_h > th_mid_l > th_low"""
+    return (th_high > th_mid_h and th_mid_h > th_mid_l and
+            th_mid_l > th_low and th_high <= 3600 and th_low >= 0)
